@@ -86,3 +86,43 @@ def test_actions_hit_page_routes(api):
     )
     assert calls[1][3] == {"interactive_only": "true"}
     assert calls[2][3] == {"format": "json"}
+
+
+@pytest.fixture
+def fake_clipboard(monkeypatch):
+    board = {"text": "user's own text", "history": []}
+
+    def clipboard(command, text=""):
+        if command == client.SET_CLIPBOARD:
+            board["text"] = text
+            board["history"].append(text)
+            return ""
+        return board["text"]
+
+    monkeypatch.setattr(client, "_clipboard", clipboard)
+    monkeypatch.setattr(client.sys, "platform", "win32")
+    return board
+
+
+def test_paste_uses_ctrl_v_and_restores_the_clipboard(api, fake_clipboard):
+    calls, _ = api
+    client.Browser("tt").paste("Chào bạn\n#vietpro")
+    assert fake_clipboard["history"] == ["Chào bạn\n#vietpro", "user's own text"]
+    assert ("POST", "/browser/tt/page/press", {"key": "Control+V"}, None) in calls
+
+
+def test_paste_restores_the_clipboard_when_the_key_press_fails(monkeypatch, fake_clipboard):
+    def request(*args, **kwargs):
+        raise FoxProfileError("FoxProfile API 422: TimeoutError")
+
+    monkeypatch.setattr(client.server, "_request", request)
+    with pytest.raises(FoxProfileError):
+        client.Browser("tt").paste("Chào bạn")
+    assert fake_clipboard["text"] == "user's own text"
+
+
+def test_paste_types_when_not_on_windows(api, monkeypatch):
+    calls, _ = api
+    monkeypatch.setattr(client.sys, "platform", "linux")
+    client.Browser("tt").paste("Chào bạn")
+    assert calls == [("POST", "/browser/tt/page/keyboard", {"text": "Chào bạn"}, None)]

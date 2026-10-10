@@ -23,6 +23,7 @@ HOME = "https://www.facebook.com/"
 TIMELINE = "https://www.facebook.com/me"
 DIALOG_GONE_SECONDS = 30
 TIMELINE_TIMEOUT_MS = 60_000
+MEDIA_TIMEOUT_MS = 120_000  # a video upload takes far longer than a photo
 
 # Found on the live page (vi-VN UI) with English names as fallback. The composer opens as an
 # unnamed dialog at /post/create; its file input stays hidden but accepts files directly.
@@ -32,7 +33,11 @@ LOCATORS = {
     "textbox": "[role=dialog] [role=textbox]",
     "photo_button": "[role=dialog] >> role=button[name=/Thêm ảnh hoặc video|Photo\\/video/i]",
     "file_input": "[role=dialog] input[type=file][multiple]",
-    "media_preview": "[role=dialog] img[src^='blob:']",
+    # A photo shows a blob: preview; a video turns the composer into the Reel form ("Tạo thước
+    # phim", same textbox and Post button) with a remove-video button instead.
+    "media_preview": (
+        "[role=dialog] :is(img[src^='blob:'], [aria-label='Gỡ video'], [aria-label='Remove video'])"
+    ),
     "audience_button": "[role=dialog] >> role=button[name=/Đối tượng của bài viết|Post audience/i]",
     "audience_only_me": "role=radio[name=/^(Chỉ mình tôi|Only me)$/i]",
     "audience_done": "role=button[name=/Đã lựa chọn xong đối tượng|^Done$/i]",
@@ -109,7 +114,7 @@ class _Run(BaseRun):
             if not self.b.evaluate(HAS_FILE_INPUT)["result"]:
                 self.b.click(LOCATORS["photo_button"])
             self.b.upload(LOCATORS["file_input"], self.media)
-            self.b.wait_for(LOCATORS["media_preview"])
+            self.b.wait_for(LOCATORS["media_preview"], timeout=MEDIA_TIMEOUT_MS)
             pause()
         self.b.click(LOCATORS["textbox"])
         self.b.keyboard_type(self.text)

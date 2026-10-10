@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import base64
 import os
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -19,6 +21,7 @@ from src.mcp_server.server import FoxProfileError, _page, _quote
 
 READY_TIMEOUT = 90
 POLL_SECONDS = 2
+SET_CLIPBOARD = "if ($in) { Set-Clipboard -Value $in } else { Set-Clipboard -Value $null }"
 
 
 def configure_from_env() -> None:
@@ -28,6 +31,22 @@ def configure_from_env() -> None:
         os.getenv("FOXPROFILE_URL", "http://127.0.0.1:8000"),
         os.getenv("FOXPROFILE_API_TOKEN", ""),
     )
+
+
+def _clipboard(command: str, text: str = "") -> str:
+    """Run a clipboard cmdlet with `text` as `$in`; UTF-8 both ways so Vietnamese survives."""
+    script = (
+        "[Console]::InputEncoding = [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false);"
+        "$in = [Console]::In.ReadToEnd(); " + command
+    )
+    done = subprocess.run(
+        ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+        input=text.encode("utf-8"),
+        capture_output=True,
+        timeout=30,
+        check=True,
+    )
+    return done.stdout.decode("utf-8").removesuffix("\r\n")
 
 
 class Browser:
@@ -70,6 +89,23 @@ class Browser:
 
     def keyboard_type(self, text: str) -> dict:
         return self._act("POST", "keyboard", {"text": text})
+
+    def paste(self, text: str) -> None:
+        """Enter text with one Ctrl+V through the Windows clipboard, then restore the clipboard.
+
+        Rich editors such as TikTok's re-render while keys are typed one by one and lose or move
+        characters of longer text; a real paste lands in one piece. The browser must run on this
+        machine. Elsewhere this falls back to typing.
+        """
+        if sys.platform != "win32":
+            self.keyboard_type(text)
+            return
+        saved = _clipboard("Get-Clipboard -Raw")
+        try:
+            _clipboard(SET_CLIPBOARD, text)
+            self.press("Control+V")
+        finally:
+            _clipboard(SET_CLIPBOARD, saved)  # text only: an image on the clipboard is lost
 
     def press(self, key: str) -> dict:
         return self._act("POST", "press", {"key": key})
