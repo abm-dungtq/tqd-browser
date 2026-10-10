@@ -54,6 +54,29 @@ CONTENT_QUESTION = (
 )
 
 
+DISMISS_QUESTION = (
+    "A pop-up covers a page that an automation is filling in. Which of the `buttons` only closes "
+    "or acknowledges this pop-up and lets the user keep working, without publishing, sharing, "
+    "saving, scheduling, deleting or discarding anything?"
+)
+NO_SAFE_BUTTON = (
+    "No button only closes the pop-up, or every way out publishes, saves, deletes or discards."
+)
+# Buttons that just acknowledge a feature tip; pressing one changes nothing.
+TIP_BUTTONS = re.compile(r"^(đã hiểu|got it|ok|okay|đồng ý, đã hiểu)$", re.IGNORECASE)
+
+OUTCOME_QUESTION = (
+    "An automation just pressed Post and this dialog appeared. What does it say about the post?"
+)
+POST_OUTCOMES = {
+    "published": "The post was published or sent.",
+    "processing": "The post was accepted and is still uploading, processing or under review.",
+    "rejected": "The post failed, was blocked or rejected, or must be fixed before it can go out.",
+    "needs_human": "The dialog asks the user for a decision before anything else happens.",
+    "unrelated": "A tip, promotion or notice that says nothing about whether the post went out.",
+}
+
+
 @dataclass
 class Verdict:
     label: str
@@ -66,6 +89,10 @@ class Judge(Protocol):
     def page_state(self, platform: str, url: str, snapshot: str) -> Verdict: ...
 
     def content_ok(self, platform: str, text: str) -> Verdict: ...
+
+    def pick_dismiss(self, platform: str, overlay: str, buttons: list[str]) -> Verdict: ...
+
+    def post_outcome(self, platform: str, dialog: str) -> Verdict: ...
 
 
 def _has(haystack: str, needles: tuple[str, ...]) -> bool:
@@ -107,6 +134,17 @@ class HeuristicJudge:
             if phrase in lowered:
                 return Verdict("block", 1.0, "heuristic", f"blocked phrase: {phrase}")
         return Verdict("ok", 1.0, "heuristic")
+
+    def pick_dismiss(self, platform: str, overlay: str, buttons: list[str]) -> Verdict:
+        for i, label in enumerate(buttons):
+            if TIP_BUTTONS.match(label.strip()):
+                return Verdict(str(i), 0.9, "heuristic")
+        return Verdict("none", 0.0, "heuristic")
+
+    def post_outcome(self, platform: str, dialog: str) -> Verdict:
+        if _has(dialog.lower(), rules.PLATFORMS.get(platform, {}).get("published", ())):
+            return Verdict("published", 0.9, "heuristic")
+        return Verdict(PageState.UNKNOWN.value, 0.0, "heuristic")
 
 
 # twitter-text v3: these code point ranges count 1, everything else 2; every URL counts 23.
@@ -173,6 +211,32 @@ class TypeSafeJudge:
         label = "ok" if score >= TYPESAFE_SAFE else "block"
         return Verdict(label, score, "typesafe")
 
+    def pick_dismiss(self, platform: str, overlay: str, buttons: list[str]) -> Verdict:
+        from typesafe_sdk import Choice
+
+        options = {str(i): label for i, label in enumerate(buttons)}
+        state = {"platform": platform, "popup_text": overlay[:2000], "buttons": options}
+        question = Choice(
+            instructions=DISMISS_QUESTION, criteria={**options, "none": NO_SAFE_BUTTON}
+        )
+        try:
+            answer = self.client.system_one(state, {"dismiss": question}).answers["dismiss"]
+            return Verdict(answer.choice, float(answer.confidence), "typesafe")
+        except Exception as e:  # without an answer nothing is pressed
+            return Verdict("none", 0.0, "typesafe", str(e)[:200])
+
+    def post_outcome(self, platform: str, dialog: str) -> Verdict:
+        from typesafe_sdk import Choice
+
+        question = Choice(instructions=OUTCOME_QUESTION, criteria=POST_OUTCOMES)
+        try:
+            answer = self.client.system_one(
+                {"platform": platform, "dialog_text": dialog[:2000]}, {"outcome": question}
+            ).answers["outcome"]
+            return Verdict(answer.choice, float(answer.confidence), "typesafe")
+        except Exception as e:
+            return Verdict(PageState.UNKNOWN.value, 0.0, "typesafe", str(e)[:200])
+
 
 class CompositeJudge:
     def __init__(self, heuristic: Judge, typesafe: Judge | None = None):
@@ -192,6 +256,25 @@ class CompositeJudge:
         final = t if h.label != "block" and t and t.label == "block" else h
         digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
         self._log("content", platform, {"text_sha256": digest, "chars": len(text)}, h, t, final)
+        return final
+
+    def pick_dismiss(self, platform: str, overlay: str, buttons: list[str]) -> Verdict:
+        """A known tip button wins; otherwise only a confident TypeSafe pick, else none."""
+        h = self.heuristic.pick_dismiss(platform, overlay, buttons)
+        t = None
+        final = h
+        if h.label == "none" and self.typesafe:
+            t = self.typesafe.pick_dismiss(platform, overlay, buttons)
+            if t.confidence >= TYPESAFE_TRUSTED:
+                final = t
+        self._log("dismiss", platform, {"buttons": buttons}, h, t, final)
+        return final
+
+    def post_outcome(self, platform: str, dialog: str) -> Verdict:
+        h = self.heuristic.post_outcome(platform, dialog)
+        t = self.typesafe.post_outcome(platform, dialog) if self.typesafe else None
+        final = t if t and t.confidence >= TYPESAFE_TRUSTED else h
+        self._log("post_outcome", platform, {"dialog": dialog[:300]}, h, t, final)
         return final
 
     @staticmethod

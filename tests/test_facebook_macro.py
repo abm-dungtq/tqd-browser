@@ -18,6 +18,7 @@ COMPOSER = (
 )
 LOGIN = '- textbox "Email hoặc số điện thoại"\n- textbox "Mật khẩu"\n- button "Đăng nhập"'
 POST_URL = "https://www.facebook.com/someone/posts/pfbid0abc"
+REEL_URL = "https://www.facebook.com/reel/1000000000000000/"
 NOW = datetime(2026, 10, 10, 9, 0, tzinfo=TZ)
 
 REQUIRED = {
@@ -48,10 +49,13 @@ def _env(tmp_path, monkeypatch):
 class FakeBrowser:
     """Scripted page: `pages` maps the step to the snapshot shown there."""
 
-    def __init__(self, home=FEED, composer=COMPOSER, dialog_closes=True, on_timeline=True):
+    def __init__(
+        self, home=FEED, composer=COMPOSER, dialog_closes=True, on_timeline=True, reel=True
+    ):
         self.url, self.page = "about:blank", ""
         self.home, self.composer = home, composer
         self.dialog_closes, self.on_timeline = dialog_closes, on_timeline
+        self.reel = reel  # whether the new Reel's page shows the post text
         self.calls = []
         self.dialog_open = False
 
@@ -107,6 +111,10 @@ class FakeBrowser:
             return {"result": self.url}
         if "[role=dialog]" in script and "querySelector" in script and "article" not in script:
             return {"result": self.dialog_open}
+        if script == facebook.REEL_LINKS:
+            return {"result": [REEL_URL]}
+        if script.startswith("document.body.innerText.includes"):
+            return {"result": self.reel and self.url == REEL_URL}
         return {"result": POST_URL}
 
     def clicks(self, key):
@@ -210,10 +218,19 @@ def test_video_becomes_a_reel_and_publishes_once():
     # instead, and the upload can take a while.
     b = FakeBrowser()
     result = run(b, images=("media_outbox/clip.mp4",))
-    assert result.status == "published"
+    assert result.status == "published" and result.url == REEL_URL
+    assert ("navigate", facebook.REELS) in b.calls
     assert "Gỡ video" in L["media_preview"] and "blob:" in L["media_preview"]
     assert b.wait_timeouts[L["media_preview"]] >= 60_000
     assert b.clicks("post_button") == 1
+
+
+def test_reel_missing_is_unconfirmed_and_not_retried(tmp_path):
+    b = FakeBrowser(reel=False)
+    result = run(b, images=("media_outbox/clip.mp4",))
+    assert result.status == "failed" and "reel not found" in result.detail
+    assert b.clicks("post_button") == 1
+    assert ledger(tmp_path)[-1]["post_clicked"] is True
 
 
 def test_happy_path_publishes_once(tmp_path):

@@ -41,7 +41,6 @@ LOCATORS = {
     "discard_confirm": (
         "[role=dialog] >> role=button[name=/Hủy bỏ nội dung chỉnh sửa|^Hủy bỏ$|^Discard$/i]"
     ),
-    "tip_dismiss": "role=button[name=/^(Đã hiểu|Got it)$/i] >> visible=true",
     "posts_list_url": "/tiktokstudio/content",
 }
 
@@ -49,10 +48,6 @@ POST_ENABLED = """(() => {
   const b = [...document.querySelectorAll('button')].find(x => /^(Đăng|Post)$/.test(x.innerText.trim()));
   return !!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
 })()"""
-# Feature tips ("Đã hiểu") can pop up over the form after a video upload and block clicks.
-HAS_TIP = """[...document.querySelectorAll('button')]
-  .some(b => /^(Đã hiểu|Got it)$/i.test(b.innerText.trim()) && b.offsetParent !== null)"""
-MAX_TIPS = 3
 CAPTION_TEXT = (
     "(document.querySelector('[data-e2e=caption_container] [contenteditable=true]') || {})"
     ".innerText || ''"
@@ -115,7 +110,7 @@ class _Run(BaseRun):
             return stop
 
         if self.photos:
-            self.b.click(LOCATORS["photo_tab"])
+            self.click(LOCATORS["photo_tab"])
             pause()
         self.b.upload(LOCATORS["file_input"], self.media)
         if self.photos:
@@ -131,12 +126,8 @@ class _Run(BaseRun):
         if stop:
             return stop
 
-        for _ in range(MAX_TIPS):
-            if not self.b.evaluate(HAS_TIP)["result"]:
-                break
-            self.b.click(LOCATORS["tip_dismiss"])
-            pause()
-        self.b.click(LOCATORS["caption"])
+        self.clear_overlays()  # feature tips ("Đã hiểu") pop up over the form after an upload
+        self.click(LOCATORS["caption"])
         self.b.press("Control+A")  # the editor holds the file name
         self.b.press("Backspace")
         pause()
@@ -148,7 +139,7 @@ class _Run(BaseRun):
             return self._end("needs_agent", detail="caption was not entered", snapshot=snapshot)
         if visibility == "only_me":
             for key in ("visibility_button", "visibility_only_me"):
-                self.b.click(LOCATORS[key])
+                self.click(LOCATORS[key])
                 pause()
 
         if dry_run:
@@ -158,19 +149,23 @@ class _Run(BaseRun):
             return self._end("dry_run", evidence=evidence, detail="stopped before Post")
 
         self.click_post(LOCATORS["post_button"])
-        # Success leaves the upload page for the post list. A dialog instead (content check,
-        # copyright...) needs a human: never press anything in it.
+        # Success leaves the upload page for the post list. A dialog instead is read by the judge:
+        # only a tip unrelated to the post may be closed; anything else stops the run.
         for _ in range(PUBLISH_SECONDS):
             _sleep(1)
             if LOCATORS["posts_list_url"] in self.b.evaluate("location.href")["result"]:
                 break
             modal = self.b.evaluate(MODAL_TEXT)["result"]
             if modal:
-                return self.sent(
-                    "failed",
-                    evidence=self._evidence(),
-                    detail=f"publish unconfirmed: dialog {modal}",
-                )
+                outcome = self.dialog_after_post(modal)
+                if outcome == "go":
+                    break
+                if outcome == "stop":
+                    return self.sent(
+                        "failed",
+                        evidence=self._evidence(),
+                        detail=f"publish unconfirmed: dialog {modal}",
+                    )
         else:
             return self.sent("failed", evidence=self._evidence(), detail="publish unconfirmed")
 

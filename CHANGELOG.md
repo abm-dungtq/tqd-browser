@@ -16,6 +16,9 @@
 - MCP `post_facebook`, `post_tiktok`, `post_x`, `automation_status`, `page_state`. Không có tool nào gỡ khoá hay tắt kill switch; chỉ người dùng xoá các file đó.
 - `scripts/ensure-server.ps1`: bật server (`src.server --headed`, cổng 8000) nếu chưa chạy, ghi PID vào `automation_data/server.pid`, dùng lại server đang chạy thay vì mở cái thứ hai.
 - Mẫu brief nội dung `tqd_automation/content_brief.example.md` (bản dùng thật để ở `automation_data/content_brief.md`, không commit).
+- Macro tự đóng pop-up (mẹo tính năng, thông báo) che form: Judge chọn nút chỉ để đóng (heuristic cho "Đã hiểu"/"Got it", TypeSafe cho nút lạ khi đủ chắc), còn code luôn từ chối nút có thể đăng, lưu, huỷ hay xoá. Bấm vào ô bị che sẽ thử lại đúng một lần sau khi đóng pop-up; nút Đăng thì không bao giờ.
+- Hộp thoại sau khi bấm Đăng được Judge đọc: "đã đăng" hoặc "đang xử lý" được tính là đã gửi; câu hỏi cần quyết định (vd. TikTok "Tiếp tục đăng?"), lỗi hoặc không chắc thì dừng và để người dùng xử lý.
+- Facebook: bài video (thành thước phim) được tìm trong `/me/reels/` thay vì dòng thời gian.
 
 ### Sửa
 - App desktop: nút "Launch" không còn bị gãy chữ thành hai dòng khi dùng giao diện English.
