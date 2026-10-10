@@ -8,6 +8,7 @@ failed page step into a `failed` result, never a retry.
 from __future__ import annotations
 
 import json
+import re
 import time
 from functools import partial
 from typing import Any
@@ -16,10 +17,41 @@ from src.mcp_server.server import FoxProfileError
 
 from .. import data_dir
 from ..guards import GuardBusy, Guards
+from ..humanize import pause
 from ..judge import PageState, make_judge
 from ..result import PostResult
 
 HARD_STOPS = (PageState.CHECKPOINT.value, PageState.CAPTCHA.value)
+MAX_OVERLAYS = 3
+# Whatever the judge says, a pop-up button with one of these words is never pressed to clear it.
+NEVER_PRESS = re.compile(
+    r"đăng|post|chia sẻ|share|gửi|send|lên lịch|schedule|lưu|save|hủy|huỷ|discard|cancel|"
+    r"rời|leave|xóa|xoá|delete|gỡ|remove|báo cáo|report|chặn|block|thanh toán|pay|mua|buy",
+    re.IGNORECASE,
+)
+# The topmost visible pop-up that is not a form being filled in (those hold an editor or a file
+# input), with its buttons tagged `data-tqd-candidate` so the chosen one gets a real click.
+OVERLAY_SCAN = r"""(() => {
+  document.querySelectorAll('[data-tqd-candidate]')
+    .forEach(e => e.removeAttribute('data-tqd-candidate'));
+  const shown = e => e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden';
+  const tip = /^(Đã hiểu|Got it)$/i;
+  const roots = [...document.querySelectorAll(
+    '[role=dialog], [role=alertdialog], [role=tooltip], [class*=tooltip i], [class*=popover i]')];
+  for (const b of document.querySelectorAll('button')) {
+    if (tip.test(b.innerText.trim()) && shown(b)) roots.push(b.parentElement.parentElement || b);
+  }
+  const popups = roots.filter(r => shown(r)
+    && !r.querySelector('[contenteditable=true], textarea, input[type=file]'));
+  if (!popups.length) return null;
+  const root = popups[popups.length - 1];
+  const buttons = [...root.querySelectorAll('button, [role=button]')].filter(shown).slice(0, 12);
+  buttons.forEach((b, i) => b.setAttribute('data-tqd-candidate', String(i)));
+  return {
+    text: root.innerText.trim().slice(0, 2000),
+    buttons: buttons.map(b => (b.innerText.trim() || b.getAttribute('aria-label') || '').slice(0, 80)),
+  };
+})()"""
 
 
 def first_line(text: str, limit: int = 40) -> str:
@@ -63,6 +95,51 @@ class BaseRun:
 
     def act(self, visibility: str, dry_run: bool) -> PostResult:
         raise NotImplementedError
+
+    def click(self, selector: str) -> None:
+        """Click a form control; if a pop-up blocks it, clear the pop-up and try once more.
+
+        Never used for the Post button, which `click_post` presses exactly once.
+        """
+        try:
+            self.b.click(selector)
+        except FoxProfileError:
+            if not self.clear_overlays():
+                raise
+            self.b.click(selector)
+
+    def clear_overlays(self) -> int:
+        """Close pop-ups (feature tips, notices) covering the page; return how many were closed.
+
+        The judge picks which button only closes the pop-up; code refuses any button that could
+        publish, save or discard, and presses nothing when the judge is unsure.
+        """
+        closed = 0
+        for _ in range(MAX_OVERLAYS):
+            scan = self.b.evaluate(OVERLAY_SCAN)["result"]
+            if not scan or not scan.get("buttons"):
+                break
+            verdict = self.judge.pick_dismiss(self.platform, scan["text"], scan["buttons"])
+            try:
+                label = scan["buttons"][int(verdict.label)]
+            except (ValueError, IndexError):
+                break  # "none" or an index that is not on the list
+            if NEVER_PRESS.search(label):
+                break
+            self.b.click(f"[data-tqd-candidate='{int(verdict.label)}']")
+            pause()
+            closed += 1
+        return closed
+
+    def dialog_after_post(self, text: str) -> str:
+        """What to do about a dialog seen after Post: "go" (sent or processing), "wait" (an
+        unrelated tip was closed, keep watching) or "stop" (failure, a question, or unsure)."""
+        outcome = self.judge.post_outcome(self.platform, text).label
+        if outcome in ("published", "processing"):
+            return "go"
+        if outcome == "unrelated" and self.clear_overlays():
+            return "wait"
+        return "stop"
 
     def click_post(self, selector: str) -> None:
         """Write the pending line first, so a crash after the click still counts as sent."""

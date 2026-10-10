@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import time
+from pathlib import PurePath
 from typing import Any, Literal
 
 from src.mcp_server.server import FoxProfileError
@@ -24,6 +25,13 @@ TIMELINE = "https://www.facebook.com/me"
 DIALOG_GONE_SECONDS = 30
 TIMELINE_TIMEOUT_MS = 60_000
 MEDIA_TIMEOUT_MS = 120_000  # a video upload takes far longer than a photo
+VIDEO_EXT = {".mp4", ".mov", ".webm", ".m4v"}
+# A video is published as a Reel, which shows under the profile's Reels tab, not on the timeline.
+REELS = "https://www.facebook.com/me/reels/"
+REEL_ATTEMPTS = 6
+REEL_LINKS = r"""[...new Set([...document.querySelectorAll('a[href*="/reel/"]')]
+  .map(a => a.href.split('?')[0]).filter(h => /\/reel\/\d+/.test(h)))].slice(0, 3)"""
+PAGE_HAS_TEXT = "document.body.innerText.includes(%s)"
 
 # Found on the live page (vi-VN UI) with English names as fallback. The composer opens as an
 # unnamed dialog at /post/create; its file input stays hidden but accepts files directly.
@@ -103,7 +111,7 @@ class _Run(BaseRun):
         if stop:
             return stop
 
-        self.b.click(LOCATORS["composer_open"])
+        self.click(LOCATORS["composer_open"])
         self.b.wait_for(LOCATORS["dialog"])
         pause()
         stop = self._stop_unless(PageState.COMPOSER_OPEN.value, PageState.READY.value)
@@ -112,16 +120,16 @@ class _Run(BaseRun):
 
         if self.media:
             if not self.b.evaluate(HAS_FILE_INPUT)["result"]:
-                self.b.click(LOCATORS["photo_button"])
+                self.click(LOCATORS["photo_button"])
             self.b.upload(LOCATORS["file_input"], self.media)
             self.b.wait_for(LOCATORS["media_preview"], timeout=MEDIA_TIMEOUT_MS)
             pause()
-        self.b.click(LOCATORS["textbox"])
+        self.click(LOCATORS["textbox"])
         self.b.keyboard_type(self.text)
         pause()
         if audience == "only_me":
             for key in ("audience_button", "audience_only_me", "audience_done"):
-                self.b.click(LOCATORS[key])
+                self.click(LOCATORS[key])
                 pause()
 
         if dry_run:
@@ -138,8 +146,18 @@ class _Run(BaseRun):
         else:
             return self.sent("failed", evidence=self._evidence(), detail="publish unconfirmed")
 
-        self.b.navigate(TIMELINE)
         line = first_line(self.text)
+        if any(PurePath(m).suffix.lower() in VIDEO_EXT for m in self.media):
+            url = self._find_reel(line)
+            if url:
+                return self.confirm_safe(url)
+            return self.sent(
+                "failed",
+                evidence=self._evidence(),
+                detail="publish unconfirmed: reel not found under the profile's Reels",
+            )
+
+        self.b.navigate(TIMELINE)
         try:
             self.b.wait_for_text(line, timeout=TIMELINE_TIMEOUT_MS)
         except FoxProfileError:
@@ -149,3 +167,15 @@ class _Run(BaseRun):
                 detail="publish unconfirmed: post not visible on timeline",
             )
         return self.confirm_safe(self.b.evaluate(FIND_POST_URL % json.dumps(line))["result"] or "")
+
+    def _find_reel(self, line: str) -> str:
+        """The newest Reel whose page shows the post text; a new Reel can take a while to list."""
+        for _ in range(REEL_ATTEMPTS):
+            self.b.navigate(REELS)
+            _sleep(5)
+            for link in self.b.evaluate(REEL_LINKS)["result"] or []:
+                self.b.navigate(link)
+                _sleep(3)
+                if self.b.evaluate(PAGE_HAS_TEXT % json.dumps(line))["result"]:
+                    return link
+        return ""

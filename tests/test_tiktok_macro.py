@@ -7,11 +7,12 @@ import pytest
 
 from src.mcp_server.server import FoxProfileError
 from tqd_automation.guards import TZ, Guards
-from tqd_automation.judge import CompositeJudge, HeuristicJudge
-from tqd_automation.platforms import tiktok
+from tqd_automation.judge import CompositeJudge, HeuristicJudge, Verdict
+from tqd_automation.platforms import common, tiktok
 from tqd_automation.platforms.tiktok import LOCATORS as L
 from tqd_automation.platforms.tiktok import post
 
+TIP_BUTTON = "[data-tqd-candidate='0']"
 UPLOAD = '- tab "Video" [selected]\n- tab "Ảnh"\n- button "Chọn video"'
 FORM = '- combobox:\n  - text: Mọi người\n- button "Đăng"\n- button "Hủy bỏ"'
 POST_URL = "https://www.tiktok.com/@someone/photo/7600000000000000000"
@@ -36,6 +37,7 @@ def _env(tmp_path, monkeypatch):
     for key in ("TQD_AUTOMATION_DISABLED", "TQD_REQUIRE_APPROVAL", "TQD_MIN_INTERVAL_MIN"):
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setattr(tiktok, "pause", lambda *a: None)
+    monkeypatch.setattr(common, "pause", lambda *a: None)
     monkeypatch.setattr(tiktok, "_sleep", lambda s: None)
 
 
@@ -48,6 +50,7 @@ class FakeBrowser:
         after_post="redirect",
         listed=True,
         tips=0,
+        modal="Kiểm tra nội dung",
     ):
         self.url, self.page = "about:blank", ""
         self.upload_page = upload_page
@@ -56,6 +59,7 @@ class FakeBrowser:
         self.after_post = after_post  # "redirect" | "modal" | "stay"
         self.listed = listed
         self.tips = tips  # "Đã hiểu" feature tips covering the form
+        self.modal = modal  # the dialog shown after Post when after_post == "modal"
         self.caption_text = ""
         self.polls = 0
         self.posted = False
@@ -74,7 +78,7 @@ class FakeBrowser:
 
     def click(self, selector, timeout=10_000):
         self.calls.append(("click", selector))
-        if selector == L["tip_dismiss"]:
+        if selector == TIP_BUTTON:
             self.tips -= 1
         if selector == L["caption"] and self.tips:
             raise FoxProfileError("FoxProfile API 422: TimeoutError: Locator.click")
@@ -111,10 +115,12 @@ class FakeBrowser:
             return {"result": self.ready_after is not None and self.polls >= self.ready_after}
         if script == tiktok.CAPTION_TEXT:
             return {"result": self.caption_text}
-        if script == tiktok.HAS_TIP:
-            return {"result": self.tips > 0}
+        if script == common.OVERLAY_SCAN:
+            if self.after_post == "modal" and self.posted:
+                return {"result": {"text": self.modal, "buttons": ["Hủy", "Đăng ngay"]}}
+            return {"result": {"text": "Mẹo", "buttons": ["Đã hiểu"]} if self.tips else None}
         if script == tiktok.MODAL_TEXT:
-            return {"result": "Kiểm tra nội dung" if self.after_post == "modal" else ""}
+            return {"result": self.modal if self.after_post == "modal" else ""}
         if "/video/" in script:
             return {"result": POST_URL if self.listed else ""}
         raise AssertionError(f"unexpected script {script[:40]}")
@@ -130,7 +136,7 @@ def run(browser, text="Chào buổi tối #tqd", media=("media_outbox/a.png",), 
         text,
         list(media),
         browser=browser,
-        judge=CompositeJudge(HeuristicJudge()),
+        judge=kw.pop("judge", CompositeJudge(HeuristicJudge())),
         guards=guards,
         **kw,
     )
@@ -267,9 +273,45 @@ def test_post_not_listed_yet_is_still_published(tmp_path, monkeypatch):
 def test_feature_tips_are_dismissed_before_the_caption():
     b = FakeBrowser(tips=2)
     assert run(b, media=("media_outbox/a.mp4",)).status == "published"
-    assert b.clicks("tip_dismiss") == 2
     names = [c[1] for c in b.calls if c[0] == "click"]
-    assert names.index(L["caption"]) > max(i for i, n in enumerate(names) if n == L["tip_dismiss"])
+    assert names.count(TIP_BUTTON) == 2
+    assert names.index(L["caption"]) > max(i for i, n in enumerate(names) if n == TIP_BUTTON)
+
+
+def test_continue_posting_question_after_post_is_left_to_a_human():
+    b = FakeBrowser(after_post="modal", modal="Tiếp tục đăng? Chúng tôi vẫn đang kiểm tra video")
+    result = run(b, media=("media_outbox/a.mp4",))
+    assert result.status == "failed" and "Tiếp tục đăng?" in result.detail
+    assert TIP_BUTTON not in [c[1] for c in b.calls if c[0] == "click"]
+    assert b.clicks("post_button") == 1
+
+
+class _Judge(CompositeJudge):
+    """A judge whose TypeSafe answers are fixed, to drive the dialog handling after Post."""
+
+    def __init__(self, outcome, dismiss="none"):
+        super().__init__(HeuristicJudge())
+        self.outcome, self.dismiss = outcome, dismiss
+
+    def post_outcome(self, platform, dialog):
+        return Verdict(self.outcome, 0.9, "typesafe")
+
+    def pick_dismiss(self, platform, overlay, buttons):
+        return Verdict(self.dismiss, 0.9, "typesafe")
+
+
+def test_processing_dialog_after_post_counts_as_published():
+    b = FakeBrowser(after_post="modal", modal="Video của bạn đang được xử lý")
+    result = run(b, media=("media_outbox/a.mp4",), judge=_Judge("processing"))
+    assert result.status == "published" and result.url == POST_URL
+
+
+def test_judge_cannot_press_a_publish_button_in_a_dialog():
+    # Even a confident judge pointing at "Đăng ngay" is refused by the deny list.
+    b = FakeBrowser(after_post="modal", modal="Tiếp tục đăng?")
+    result = run(b, media=("media_outbox/a.mp4",), judge=_Judge("unrelated", "1"))
+    assert result.status == "failed"
+    assert "[data-tqd-candidate='1']" not in [c[1] for c in b.calls if c[0] == "click"]
 
 
 def test_video_discard_confirm_button_is_matched():

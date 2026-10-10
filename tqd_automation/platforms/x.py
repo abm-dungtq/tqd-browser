@@ -11,7 +11,6 @@ import time
 from pathlib import PurePath
 from typing import Any
 
-from .. import rules
 from ..guards import Guards
 from ..humanize import pause
 from ..judge import PageState
@@ -100,7 +99,7 @@ class _Run(BaseRun):
             self.b.upload(LOCATORS["file_input"], self.media)
             self.b.wait_for(LOCATORS["media_preview"])
             pause()
-        self.b.click(LOCATORS["textbox"])
+        self.click(LOCATORS["textbox"])
         self.b.keyboard_type(self.text)
         pause()
         if first_line(self.text) not in self.b.evaluate(COMPOSER_TEXT)["result"]:
@@ -120,9 +119,10 @@ class _Run(BaseRun):
                 break
             alert = self.b.evaluate(ALERT_TEXT)["result"]
             # "Your post was sent" can show while the composer is still closing.
-            if any(p in alert.lower() for p in rules.PLATFORMS[PLATFORM]["published"]):
+            outcome = self.dialog_after_post(alert) if alert else "wait"
+            if outcome == "go":
                 break
-            if alert:
+            if outcome == "stop":
                 return self.sent(
                     "failed", evidence=self._evidence(), detail=f"publish unconfirmed: {alert}"
                 )
