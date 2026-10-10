@@ -44,15 +44,31 @@ LOCATORS = {
 
 DIALOG_OPEN = "!!document.querySelector('[role=dialog] form')"
 HAS_FILE_INPUT = "!!document.querySelector('[role=dialog] input[type=file][multiple]')"
-# Link of the newest timeline post containing the text; tracking parameters are dropped.
-FIND_POST_URL = """(() => {
+# Permalink of the timeline post containing the text. Timeline posts are [aria-posinset] blocks
+# ([role=article] is mostly comments). Their timestamp links carry a placeholder href that
+# Facebook swaps for the real /posts/pfbid... link on focus; the photo link is the fallback.
+# Only tracking parameters (`__cft__`, `__tn__`, ...) are dropped.
+FIND_POST_URL = """(async () => {
   const text = %s;
-  const article = [...document.querySelectorAll('[role=article]')].find(a => a.innerText.includes(text));
-  if (!article) return '';
-  const link = [...article.querySelectorAll('a[href]')]
-    .find(a => /\\/posts\\/|story_fbid|pfbid/.test(a.href));
-  if (!link) return '';
-  return link.href.includes('story_fbid') ? link.href : link.href.split('?')[0];
+  const hit = [...document.querySelectorAll('[aria-posinset], [role=article]')]
+    .find(el => el.innerText.includes(text));
+  if (!hit) return '';
+  const post = hit.closest('[aria-posinset]') || hit;
+  const clean = href => {
+    const url = new URL(href, location.origin);
+    for (const key of [...url.searchParams.keys()]) if (key.startsWith('__')) url.searchParams.delete(key);
+    return url.toString();
+  };
+  for (const a of post.querySelectorAll('a[href^="?"], a[href*="__cft__"]')) {
+    a.focus();
+    a.dispatchEvent(new MouseEvent('mouseover', {bubbles: true}));
+  }
+  await new Promise(resolve => setTimeout(resolve, 500));
+  const links = [...post.querySelectorAll('a[href]')].map(a => a.href);
+  const permalink = links.find(h => /\\/posts\\/|story_fbid|pfbid/.test(h));
+  if (permalink) return clean(permalink);
+  const photo = links.find(h => /\\/photo\\/?\\?fbid=/.test(h));
+  return photo ? clean(photo) : '';
 })()"""
 
 HARD_STOPS = (PageState.CHECKPOINT.value, PageState.CAPTCHA.value)
