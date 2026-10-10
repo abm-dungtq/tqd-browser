@@ -88,11 +88,16 @@ class FakeBrowser:
         if script == x.COMPOSER_OPEN:
             return {"result": self.dialog_open}
         if script == x.ALERT_TEXT:
-            return {"result": "Đã xảy ra lỗi" if self.after_post == "alert" else ""}
+            toasts = {"alert": "Đã xảy ra lỗi", "sent": "Bài đăng của bạn đã được gửi.\nXem"}
+            return {"result": toasts.get(self.after_post, "")}
+        if script == x.TOAST_URL:
+            return {"result": POST_URL if self.after_post == "sent" else ""}
         if script == x.PROFILE_HREF:
             return {"result": "/someone"}
         if "/status/" in script:
-            return {"result": POST_URL if self.listed else ""}
+            # `listed`: on which profile lookup the post shows up (False: never).
+            self.lookups = getattr(self, "lookups", 0) + 1
+            return {"result": POST_URL if self.listed and self.lookups >= self.listed else ""}
         raise AssertionError(f"unexpected script {script[:40]}")
 
     def clicks(self, key):
@@ -219,3 +224,23 @@ def test_post_not_found_yet_is_still_published_and_blocks_a_repeat(monkeypatch):
     later = Guards(now=lambda: NOW + timedelta(minutes=1))
     assert run(again, guards=later).detail == "duplicate text"
     assert again.calls == []
+
+
+def test_success_toast_while_composer_still_open_is_published(tmp_path):
+    b = FakeBrowser(after_post="sent")
+    result = run(b)
+    assert result.status == "published" and result.url == POST_URL
+    assert b.clicks("post_button") == 1
+
+
+def test_toast_link_is_used_without_visiting_the_profile():
+    b = FakeBrowser(after_post="sent")
+    assert run(b).url == POST_URL
+    assert not any(c[0] == "navigate" and c[1] != L["composer_url"] for c in b.calls)
+
+
+def test_stale_profile_timeline_is_reloaded_until_the_post_shows():
+    b = FakeBrowser(listed=3)
+    assert run(b).url == POST_URL
+    profile_loads = [c for c in b.calls if c == ("navigate", "https://x.com/someone")]
+    assert len(profile_loads) == 3

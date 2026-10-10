@@ -11,6 +11,7 @@ import time
 from pathlib import PurePath
 from typing import Any
 
+from .. import rules
 from ..guards import Guards
 from ..humanize import pause
 from ..judge import PageState
@@ -44,6 +45,8 @@ ALERT_TEXT = (
     "[...document.querySelectorAll('[role=alert], [data-testid=toast]')].map(e => e.innerText.trim())"
     ".filter(Boolean).join(' | ').slice(0, 200)"
 )
+# The "Your post was sent · View" toast links to the new post.
+TOAST_URL = "(document.querySelector('[role=alert] a[href*=\"/status/\"]') || {}).href || ''"
 PROFILE_HREF = "document.querySelector('[data-testid=AppTabBar_Profile_Link]').getAttribute('href')"
 # The status link of the newest post on the profile whose text contains the given start.
 FIND_POST_URL = """(() => {
@@ -116,6 +119,9 @@ class _Run(BaseRun):
             if not self.b.evaluate(COMPOSER_OPEN)["result"]:
                 break
             alert = self.b.evaluate(ALERT_TEXT)["result"]
+            # "Your post was sent" can show while the composer is still closing.
+            if any(p in alert.lower() for p in rules.PLATFORMS[PLATFORM]["published"]):
+                break
             if alert:
                 return self.sent(
                     "failed", evidence=self._evidence(), detail=f"publish unconfirmed: {alert}"
@@ -123,12 +129,15 @@ class _Run(BaseRun):
         else:
             return self.sent("failed", evidence=self._evidence(), detail="publish unconfirmed")
 
-        self.b.navigate("https://x.com" + self.b.evaluate(PROFILE_HREF)["result"])
-        find = FIND_POST_URL % json.dumps(first_line(self.text))
-        url = ""
-        for _ in range(FIND_ATTEMPTS):
-            _sleep(3)
-            url = self.b.evaluate(find)["result"] or ""
-            if url:
-                break
+        url = self.b.evaluate(TOAST_URL)["result"] or ""
+        if not url:
+            # Right after posting X may serve a cached profile timeline: load it afresh each try.
+            profile_url = "https://x.com" + self.b.evaluate(PROFILE_HREF)["result"]
+            find = FIND_POST_URL % json.dumps(first_line(self.text))
+            for _ in range(FIND_ATTEMPTS):
+                self.b.navigate(profile_url)
+                _sleep(5)
+                url = self.b.evaluate(find)["result"] or ""
+                if url:
+                    break
         return self.confirm_safe(url)
