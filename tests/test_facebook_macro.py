@@ -90,6 +90,7 @@ class FakeBrowser:
 
     def wait_for(self, selector, timeout=15_000):
         self._log("wait_for", selector)
+        self.wait_timeouts = {**getattr(self, "wait_timeouts", {}), selector: timeout}
 
     def wait_for_text(self, text, timeout=15_000):
         self._log("wait_for_text", text)
@@ -202,6 +203,17 @@ def test_dry_run_never_clicks_post(tmp_path):
     assert b.clicks("audience_only_me") == 1
     assert b.clicks("discard_button") == 1
     assert all(not line["post_clicked"] for line in ledger(tmp_path))
+
+
+def test_video_becomes_a_reel_and_publishes_once():
+    # A video turns the composer into the Reel form: no blob image preview, a "Gỡ video" button
+    # instead, and the upload can take a while.
+    b = FakeBrowser()
+    result = run(b, images=("media_outbox/clip.mp4",))
+    assert result.status == "published"
+    assert "Gỡ video" in L["media_preview"] and "blob:" in L["media_preview"]
+    assert b.wait_timeouts[L["media_preview"]] >= 60_000
+    assert b.clicks("post_button") == 1
 
 
 def test_happy_path_publishes_once(tmp_path):

@@ -5,6 +5,7 @@ from datetime import datetime, timedelta
 
 import pytest
 
+from src.mcp_server.server import FoxProfileError
 from tqd_automation.guards import TZ, Guards
 from tqd_automation.judge import CompositeJudge, HeuristicJudge
 from tqd_automation.platforms import tiktok
@@ -46,6 +47,7 @@ class FakeBrowser:
         caption_sticks=True,
         after_post="redirect",
         listed=True,
+        tips=0,
     ):
         self.url, self.page = "about:blank", ""
         self.upload_page = upload_page
@@ -53,6 +55,7 @@ class FakeBrowser:
         self.caption_sticks = caption_sticks
         self.after_post = after_post  # "redirect" | "modal" | "stay"
         self.listed = listed
+        self.tips = tips  # "Đã hiểu" feature tips covering the form
         self.caption_text = ""
         self.polls = 0
         self.posted = False
@@ -71,6 +74,10 @@ class FakeBrowser:
 
     def click(self, selector, timeout=10_000):
         self.calls.append(("click", selector))
+        if selector == L["tip_dismiss"]:
+            self.tips -= 1
+        if selector == L["caption"] and self.tips:
+            raise FoxProfileError("FoxProfile API 422: TimeoutError: Locator.click")
         if selector == L["post_button"]:
             self.posted = True
             if self.after_post == "redirect":
@@ -79,9 +86,11 @@ class FakeBrowser:
     def press(self, key):
         self.calls.append(("press", key))
 
-    def keyboard_type(self, text):
-        self.calls.append(("type", text))
-        if self.caption_sticks:
+    def paste(self, text):
+        self.calls.append(("paste", text))
+        if self.caption_sticks == "garbled":  # what key-by-key typing did to long captions
+            self.caption_text = text[5:] + text[:5]
+        elif self.caption_sticks:
             self.caption_text = text
 
     def upload(self, selector, paths):
@@ -102,6 +111,8 @@ class FakeBrowser:
             return {"result": self.ready_after is not None and self.polls >= self.ready_after}
         if script == tiktok.CAPTION_TEXT:
             return {"result": self.caption_text}
+        if script == tiktok.HAS_TIP:
+            return {"result": self.tips > 0}
         if script == tiktok.MODAL_TEXT:
             return {"result": "Kiểm tra nội dung" if self.after_post == "modal" else ""}
         if "/video/" in script:
@@ -216,8 +227,8 @@ def test_happy_path_publishes_once(tmp_path):
     result = run(b)
     assert result.status == "published" and result.url == POST_URL
     names = [c[0] for c in b.calls]
-    assert names.index("upload") < names.index("type")
-    assert ("press", "Control+A") in b.calls
+    assert names.index("upload") < names.index("paste")
+    assert ("press", "Control+A") in b.calls and ("press", "Backspace") in b.calls
     assert b.clicks("post_button") == 1
     lines = ledger(tmp_path)
     assert [(x["status"], x["post_clicked"]) for x in lines] == [
@@ -251,3 +262,24 @@ def test_post_not_listed_yet_is_still_published(tmp_path, monkeypatch):
     later = Guards(now=lambda: NOW + timedelta(minutes=1))
     assert run(again, guards=later).detail == "duplicate text"
     assert again.calls == []
+
+
+def test_feature_tips_are_dismissed_before_the_caption():
+    b = FakeBrowser(tips=2)
+    assert run(b, media=("media_outbox/a.mp4",)).status == "published"
+    assert b.clicks("tip_dismiss") == 2
+    names = [c[1] for c in b.calls if c[0] == "click"]
+    assert names.index(L["caption"]) > max(i for i, n in enumerate(names) if n == L["tip_dismiss"])
+
+
+def test_video_discard_confirm_button_is_matched():
+    # Photos ask "Hủy bỏ nội dung chỉnh sửa"; a video draft's confirm button is just "Hủy bỏ".
+    assert "^Hủy bỏ$" in L["discard_confirm"]
+    assert "Hủy bỏ nội dung chỉnh sửa" in L["discard_confirm"]
+
+
+def test_caption_entered_out_of_order_needs_agent():
+    b = FakeBrowser(caption_sticks="garbled")
+    result = run(b, text="Nhờ AI viết bài\n\n#vietpro #AI")
+    assert result.status == "needs_agent" and "caption" in result.detail
+    assert b.clicks("post_button") == 0

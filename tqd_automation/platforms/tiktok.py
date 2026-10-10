@@ -37,7 +37,11 @@ LOCATORS = {
     "visibility_only_me": "role=option[name=/Chỉ mình bạn|Only you|Only me/i]",
     "post_button": "role=button[name=/^(Đăng|Post)$/]",
     "discard_button": "role=button[name=/^(Hủy bỏ|Discard)$/i]",
-    "discard_confirm": "[role=dialog] >> role=button[name=/Hủy bỏ nội dung chỉnh sửa|^Discard$/i]",
+    # Photo drafts ask "Hủy bỏ nội dung chỉnh sửa", video drafts just "Hủy bỏ".
+    "discard_confirm": (
+        "[role=dialog] >> role=button[name=/Hủy bỏ nội dung chỉnh sửa|^Hủy bỏ$|^Discard$/i]"
+    ),
+    "tip_dismiss": "role=button[name=/^(Đã hiểu|Got it)$/i] >> visible=true",
     "posts_list_url": "/tiktokstudio/content",
 }
 
@@ -45,6 +49,10 @@ POST_ENABLED = """(() => {
   const b = [...document.querySelectorAll('button')].find(x => /^(Đăng|Post)$/.test(x.innerText.trim()));
   return !!b && !b.disabled && b.getAttribute('aria-disabled') !== 'true';
 })()"""
+# Feature tips ("Đã hiểu") can pop up over the form after a video upload and block clicks.
+HAS_TIP = """[...document.querySelectorAll('button')]
+  .some(b => /^(Đã hiểu|Got it)$/i.test(b.innerText.trim()) && b.offsetParent !== null)"""
+MAX_TIPS = 3
 CAPTION_TEXT = (
     "(document.querySelector('[data-e2e=caption_container] [contenteditable=true]') || {})"
     ".innerText || ''"
@@ -60,6 +68,10 @@ FIND_POST_URL = """(() => {
     .find(a => a.innerText.includes(text));
   return link ? link.href : '';
 })()"""
+
+
+def _words(text: str) -> str:
+    return " ".join(text.split())
 
 
 def _sleep(seconds: float) -> None:
@@ -119,11 +131,19 @@ class _Run(BaseRun):
         if stop:
             return stop
 
+        for _ in range(MAX_TIPS):
+            if not self.b.evaluate(HAS_TIP)["result"]:
+                break
+            self.b.click(LOCATORS["tip_dismiss"])
+            pause()
         self.b.click(LOCATORS["caption"])
-        self.b.press("Control+A")  # the editor may hold the file name
-        self.b.keyboard_type(self.text)
+        self.b.press("Control+A")  # the editor holds the file name
+        self.b.press("Backspace")
         pause()
-        if first_line(self.text) not in self.b.evaluate(CAPTION_TEXT)["result"]:
+        # Typed key by key, this editor drops and moves characters of a long caption.
+        self.b.paste(self.text)
+        pause()
+        if _words(self.b.evaluate(CAPTION_TEXT)["result"]) != _words(self.text):
             snapshot = self.b.snapshot(interactive_only=True)["snapshot"]
             return self._end("needs_agent", detail="caption was not entered", snapshot=snapshot)
         if visibility == "only_me":
